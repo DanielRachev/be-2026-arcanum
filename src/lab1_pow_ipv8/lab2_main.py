@@ -7,13 +7,16 @@ import asyncio
 import logging
 import sys
 
-from .lab2_keyutil import extract_public_key_hex
+from .lab2_keyutil import extract_public_key_hex, fmt_peer, load_pubkey_name_map, load_team_pubkeys
 from .lab2_udp_prep import (
     UdpPrepServer,
     PeerEndpoint,
     compute_canonical_order,
+    get_primary_outbound_ip,
+    get_submitter_for_round,
     send_ping,
     announce_endpoint,
+    ensure_udp_connectivity,
 )
 
 
@@ -64,6 +67,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable debug logging",
     )
+
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        required=False,
+        help="Seconds to timeout after (default is 300s = 5 min)",
+    )
     return parser.parse_args()
 
 
@@ -99,6 +109,8 @@ async def run_prep_phase(
     local_port: int,
     peers: list[PeerEndpoint],
     test_udp: bool,
+    timeout: int,
+    name_map: dict[str, str],
     auto_discover: bool = False,
     teammate_pubkeys: list[str] | None = None,
     key_file: str = "lab1_identity.pem",
@@ -116,6 +128,10 @@ async def run_prep_phase(
             LOGGER.error("--auto-discover requires --peer-pubkey arguments")
             return 1
 
+    server = UdpPrepServer(local_port, local_pubkey)
+    await server.start()
+    if auto_discover:
+        assert teammate_pubkeys is not None
         # Use IPv8 discovery to get teammate endpoints
         from .libsodium_bootstrap import ensure_libsodium
         from .lab2_discovery import build_lab2_discovery_community
@@ -152,24 +168,42 @@ async def run_prep_phase(
             overlay = next(
                 o for o in ipv8.overlays if isinstance(o, Lab2DiscoveryCommunity)
             )
-            overlay.set_local_endpoint("127.0.0.1", local_port)  # TODO: use external IP
+            local_ip = get_primary_outbound_ip()
+            overlay.set_local_endpoint(local_ip, local_port)
 
             # Convert teammate pubkey strings to bytes
             teammate_pubkeys_bin = [bytes.fromhex(pk) for pk in teammate_pubkeys]
+            overlay.set_target_pubkeys(teammate_pubkeys_bin)
 
-            # Request endpoints from teammates
             LOGGER.info(
                 f"Waiting for {len(teammate_pubkeys_bin)} teammate(s) to announce endpoints..."
             )
             discovered_endpoints = await overlay.wait_for_endpoints(
-                teammate_pubkeys_bin, timeout=10.0
+                teammate_pubkeys_bin, timeout=float(timeout)
             )
 
-            if len(discovered_endpoints) < len(teammate_pubkeys_bin):
-                missing = len(teammate_pubkeys_bin) - len(discovered_endpoints)
-                LOGGER.warning(
-                    f"Only discovered {len(discovered_endpoints)}/{len(teammate_pubkeys_bin)} endpoints"
+            discovered_peers: dict[str, PeerEndpoint] = {}
+            while len(discovered_peers) < len(teammate_pubkeys_bin):
+                discovered_endpoints = await overlay.wait_for_endpoints(
+                    teammate_pubkeys_bin, timeout=300.0
                 )
+                new_peers: list[PeerEndpoint] = []
+                for pubkey_hex in teammate_pubkeys:
+                    pubkey_bin = bytes.fromhex(pubkey_hex)
+                    if (
+                        pubkey_bin in discovered_endpoints
+                        and pubkey_hex not in discovered_peers
+                    ):
+                        host, port = discovered_endpoints[pubkey_bin]
+                        peer = PeerEndpoint(pubkey_hex, host, port)
+                        discovered_peers[pubkey_hex] = peer
+                        new_peers.append(peer)
+                        LOGGER.info(
+                            "Discovered %s... @ %s:%s",
+                            pubkey_hex[:16],
+                            host,
+                            port,
+                        )
 
             # Convert discovered endpoints to PeerEndpoint objects
             peers = []
@@ -178,24 +212,27 @@ async def run_prep_phase(
                 if pubkey_bin in discovered_endpoints:
                     host, port = discovered_endpoints[pubkey_bin]
                     peers.append(PeerEndpoint(pubkey_hex, host, port))
-                    LOGGER.info(f"Discovered {pubkey_hex[:16]}... @ {host}:{port}")
+                    LOGGER.info(f"Discovered {fmt_peer(pubkey_hex, name_map)} @ {host}:{port}")
                 else:
                     LOGGER.error(
-                        f"Failed to discover endpoint for {pubkey_hex[:16]}..."
+                        f"Failed to discover endpoint for {fmt_peer(pubkey_hex, name_map)}"
                     )
-                    return 1
+
+                if len(discovered_peers) < len(teammate_pubkeys_bin):
+                    remaining = len(teammate_pubkeys_bin) - len(discovered_peers)
+                    LOGGER.info("Waiting on %d more teammate endpoint(s)...", remaining)
+                    await asyncio.sleep(1.0)
+
+            peers = list(discovered_peers.values())
 
         finally:
             await ipv8.stop()
-
-    server = UdpPrepServer(local_port, local_pubkey)
-    await server.start()
 
     try:
         # Announce our endpoint to all known peers
         LOGGER.info(f"Announcing endpoint to {len(peers)} peer(s)")
         await announce_endpoint(
-            "127.0.0.1",  # For local testing; use external IP in production
+            get_primary_outbound_ip(),
             local_port,
             peers,
             local_pubkey,
@@ -203,7 +240,7 @@ async def run_prep_phase(
 
         if test_udp:
             LOGGER.info("Running UDP connectivity test (ping/pong)...")
-            await run_udp_test(server, peers, local_pubkey)
+            await run_udp_test(server, peers, local_pubkey, name_map)
 
         # Compute canonical order (lexicographic by pubkey)
         all_pubkeys = [local_pubkey] + [p.pubkey_hex for p in peers]
@@ -220,19 +257,16 @@ async def run_prep_phase(
         LOGGER.info("=" * 60)
         LOGGER.info("Prep Phase Complete")
         LOGGER.info("=" * 60)
-        LOGGER.info(f"Local pubkey: {local_pubkey[:16]}...")
-        if full_group:
-            LOGGER.info("Canonical order (submitter per round):")
-        else:
-            LOGGER.info("Canonical order (available participants):")
+        LOGGER.info(f"Local pubkey: {fmt_peer(local_pubkey, name_map)}")
+        LOGGER.info(f"Canonical order (submitter per round):")
         for i, pk in enumerate(canonical_order, 1):
-            label = f"Round {i}" if full_group else f"Participant {i}"
-            is_me = " <- YOU" if pk == local_pubkey else ""
-            LOGGER.info(f"  {label}: {pk[:16]}...{is_me}")
+            role = get_submitter_for_round(canonical_order, i)
+            is_me = " ← YOU" if pk == local_pubkey else ""
+            LOGGER.info(f"  Round {i}: {fmt_peer(pk, name_map)}{is_me}")
 
         LOGGER.info("\nPeer map:")
         for peer in peers:
-            LOGGER.info(f"  {peer.pubkey_hex[:16]}... -> {peer.host}:{peer.port}")
+            LOGGER.info(f"  {fmt_peer(peer.pubkey_hex, name_map)} → {peer.host}:{peer.port}")
         LOGGER.info("=" * 60)
 
         return 0
@@ -245,9 +279,12 @@ async def run_udp_test(
     server: UdpPrepServer,
     peers: list[PeerEndpoint],
     local_pubkey: str,
+    name_map: dict[str, str],
 ) -> None:
     """Test UDP connectivity by sending pings to all peers."""
-    LOGGER.info(f"Pinging {len(peers)} peer(s)...")
+    if not peers:
+        LOGGER.warning("No peers provided for UDP test")
+        return
 
     # Send pings
     tasks = [send_ping(p.host, p.port, local_pubkey) for p in peers]
@@ -259,11 +296,11 @@ async def run_udp_test(
     for peer in peers:
         got_response = await server.wait_for_pong(peer.pubkey_hex, timeout=timeout)
         if got_response:
-            LOGGER.info(f"✓ {peer.pubkey_hex[:16]}... responded")
+            LOGGER.info(f"✓ {fmt_peer(peer.pubkey_hex, name_map)} responded")
             responses.append(True)
         else:
             LOGGER.warning(
-                f"✗ {peer.pubkey_hex[:16]}... no response (timeout {timeout}s)"
+                f"✗ {fmt_peer(peer.pubkey_hex, name_map)} no response (timeout {timeout}s)"
             )
             responses.append(False)
 
@@ -279,7 +316,11 @@ def main() -> int:
         level=logging.DEBUG if args.debug else logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
     )
+    logging.getLogger("ipv8.community").setLevel(logging.CRITICAL)
     globals()["LOGGER"] = logging.getLogger("lab2_prep")
+
+    name_map = load_pubkey_name_map()
+    timeout = 300 if args.timeout is None else args.timeout
 
     # Handle --print-pubkey
     if args.print_pubkey:
@@ -299,19 +340,49 @@ def main() -> int:
     # Default to auto-discovery unless manual --peer is provided
     auto_discover = len(args.peers) == 0
 
-    peer_args_error = validate_peer_args(
-        auto_discover,
-        args.peers,
-        args.peer_pubkeys,
-    )
-    if peer_args_error:
-        print(peer_args_error, file=sys.stderr)
-        return 1
+    # Validate peer args
+    if auto_discover:
+        # Auto-discovery mode: need pubkeys from --peer-pubkey or pubkeys/
+        if args.peer_pubkeys:
+            if not (1 <= len(args.peer_pubkeys) <= 2):
+                print(
+                    "Error: pass 1 or 2 --peer-pubkey values (for the full team you want 2)",
+                    file=sys.stderr,
+                )
+                return 1
+        else:
+            # Try to load from pubkeys/ directory; need local pubkey first
+            try:
+                _local_pk = extract_public_key_hex(args.pem)
+            except Exception as exc:
+                print(f"Error loading public key: {exc}", file=sys.stderr)
+                return 1
+            try:
+                args.peer_pubkeys = load_team_pubkeys(_local_pk)
+                LOGGER.info(
+                    f"Loaded {len(args.peer_pubkeys)} teammate pubkey(s) from pubkeys/"
+                )
+            except RuntimeError as exc:
+                print(
+                    f"Error: {exc}\n"
+                    "Provide teammate keys via --peer-pubkey or place them in pubkeys/.",
+                    file=sys.stderr,
+                )
+                return 1
+    else:
+        # Manual mode: --peer and --peer-pubkey must match
+        if len(args.peers) != len(args.peer_pubkeys):
+            print(
+                f"Error: --peer and --peer-pubkey must have the same count "
+                f"({len(args.peers)} vs {len(args.peer_pubkeys)})",
+                file=sys.stderr,
+            )
+            return 1
 
     # Load local public key
     try:
         local_pubkey = extract_public_key_hex(args.pem)
-        LOGGER.info(f"Local public key: {local_pubkey[:16]}...")
+        LOGGER.info(f"Local public key: {fmt_peer(local_pubkey, name_map)}")
     except Exception as exc:
         print(f"Error loading public key: {exc}", file=sys.stderr)
         return 1
@@ -337,16 +408,24 @@ def main() -> int:
     # Run prep phase
     try:
         return asyncio.run(
-            run_prep_phase(
-                local_pubkey,
-                args.udp_port,
-                peers,
-                test_udp=args.test_udp,
-                auto_discover=auto_discover,
-                teammate_pubkeys=args.peer_pubkeys if auto_discover else None,
-                key_file=args.pem,
+            asyncio.wait_for(
+                run_prep_phase(
+                    local_pubkey,
+                    args.udp_port,
+                    peers,
+                    test_udp=args.test_udp,
+                    timeout=timeout,
+                    name_map=name_map,
+                    auto_discover=auto_discover,
+                    teammate_pubkeys=args.peer_pubkeys if auto_discover else None,
+                    key_file=args.pem,
+                ),
+                timeout=timeout,
             )
         )
+    except asyncio.TimeoutError:
+        print(f"Error: timed out after {timeout}s", file=sys.stderr)
+        return 1
     except KeyboardInterrupt:
         print("Interrupted by user", file=sys.stderr)
         return 130
