@@ -63,6 +63,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable debug logging",
     )
+
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        required=False,
+        help="Seconds to timeout after (default is 300s = 5 min)",
+    )
     return parser.parse_args()
 
 
@@ -71,6 +78,7 @@ async def run_prep_phase(
     local_port: int,
     peers: list[PeerEndpoint],
     test_udp: bool,
+    timeout: int,
     auto_discover: bool = False,
     teammate_pubkeys: list[str] | None = None,
     key_file: str = "lab1_identity.pem",
@@ -136,7 +144,7 @@ async def run_prep_phase(
                 f"Waiting for {len(teammate_pubkeys_bin)} teammate(s) to announce endpoints..."
             )
             discovered_endpoints = await overlay.wait_for_endpoints(
-                teammate_pubkeys_bin, timeout=300.0
+                teammate_pubkeys_bin, timeout=float(timeout)
             )
 
             if len(discovered_endpoints) < len(teammate_pubkeys_bin):
@@ -245,6 +253,8 @@ def main() -> int:
     logging.getLogger("ipv8.community").setLevel(logging.CRITICAL)
     globals()["LOGGER"] = logging.getLogger("lab2_prep")
 
+    timeout = 300 if args.timeout is None else args.timeout
+
     # Handle --print-pubkey
     if args.print_pubkey:
         try:
@@ -329,16 +339,23 @@ def main() -> int:
     # Run prep phase
     try:
         return asyncio.run(
-            run_prep_phase(
-                local_pubkey,
-                args.udp_port,
-                peers,
-                test_udp=args.test_udp,
-                auto_discover=auto_discover,
-                teammate_pubkeys=args.peer_pubkeys if auto_discover else None,
-                key_file=args.pem,
+            asyncio.wait_for(
+                run_prep_phase(
+                    local_pubkey,
+                    args.udp_port,
+                    peers,
+                    test_udp=args.test_udp,
+                    timeout=timeout,
+                    auto_discover=auto_discover,
+                    teammate_pubkeys=args.peer_pubkeys if auto_discover else None,
+                    key_file=args.pem,
+                ),
+                timeout=timeout,
             )
         )
+    except asyncio.TimeoutError:
+        print(f"Error: timed out after {timeout}s", file=sys.stderr)
+        return 1
     except KeyboardInterrupt:
         print("Interrupted by user", file=sys.stderr)
         return 130
