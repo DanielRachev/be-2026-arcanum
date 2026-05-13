@@ -155,7 +155,7 @@ async def run_prep_phase(
                     LOGGER.info(f"Discovered {pubkey_hex[-16:]}... @ {host}:{port}")
                 else:
                     LOGGER.error(
-                        f"Failed to discover endpoint for {pubkey_hex[-16:]}..."
+                        f"Failed to discover endpoint for ...{pubkey_hex[-16:]}"
                     )
                     return 1
 
@@ -242,6 +242,7 @@ def main() -> int:
         level=logging.DEBUG if args.debug else logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
     )
+    logging.getLogger("ipv8.community").setLevel(logging.CRITICAL)
     globals()["LOGGER"] = logging.getLogger("lab2_prep")
 
     # Handle --print-pubkey
