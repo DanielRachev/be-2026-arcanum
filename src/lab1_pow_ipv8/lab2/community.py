@@ -12,7 +12,7 @@ from ipv8.lazy_community import PacketDecodingError, lazy_wrapper
 from ipv8.messaging.lazy_payload import VariablePayload, vp_compile
 from ipv8.peer import Peer
 
-from .constants import LAB2_COMMUNITY_ID_HEX
+from ..constants import LAB2_COMMUNITY_ID_HEX
 
 LOGGER = logging.getLogger("lab2_discovery")
 

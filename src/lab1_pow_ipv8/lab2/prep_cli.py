@@ -7,8 +7,13 @@ import asyncio
 import logging
 import sys
 
-from .lab2_keyutil import extract_public_key_hex, fmt_peer, load_pubkey_name_map, load_team_pubkeys
-from .lab2_udp_prep import (
+from .keyutil import (
+    extract_public_key_hex,
+    fmt_peer,
+    load_pubkey_name_map,
+    load_team_pubkeys,
+)
+from .udp_prep import (
     UdpPrepServer,
     PeerEndpoint,
     compute_canonical_order,
@@ -103,8 +108,8 @@ async def run_prep_phase(
     if auto_discover:
         assert teammate_pubkeys is not None
         # Use IPv8 discovery to get teammate endpoints
-        from .libsodium_bootstrap import ensure_libsodium
-        from .lab2_discovery import build_lab2_discovery_community
+        from ..libsodium_bootstrap import ensure_libsodium
+        from .community import build_lab2_discovery_community
         from ipv8.configuration import (
             ConfigBuilder,
             Strategy,
@@ -182,7 +187,9 @@ async def run_prep_phase(
                 if pubkey_bin in discovered_endpoints:
                     host, port = discovered_endpoints[pubkey_bin]
                     peers.append(PeerEndpoint(pubkey_hex, host, port))
-                    LOGGER.info(f"Discovered {fmt_peer(pubkey_hex, name_map)} @ {host}:{port}")
+                    LOGGER.info(
+                        f"Discovered {fmt_peer(pubkey_hex, name_map)} @ {host}:{port}"
+                    )
                 else:
                     LOGGER.error(
                         f"Failed to discover endpoint for {fmt_peer(pubkey_hex, name_map)}"
@@ -228,7 +235,9 @@ async def run_prep_phase(
 
         LOGGER.info("\nPeer map:")
         for peer in peers:
-            LOGGER.info(f"  {fmt_peer(peer.pubkey_hex, name_map)} → {peer.host}:{peer.port}")
+            LOGGER.info(
+                f"  {fmt_peer(peer.pubkey_hex, name_map)} → {peer.host}:{peer.port}"
+            )
         LOGGER.info("=" * 60)
 
         return 0

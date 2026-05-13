@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from lab1_pow_ipv8.lab2_udp_prep import (
+from lab1_pow_ipv8.lab2.udp_prep import (
     compute_canonical_order,
     get_submitter_for_round,
     PeerEndpoint,

@@ -6,7 +6,7 @@ import glob
 import os
 import sys
 
-from .libsodium_bootstrap import ensure_libsodium
+from ..libsodium_bootstrap import ensure_libsodium
 
 
 def extract_public_key_hex(pem_path: str) -> str:
