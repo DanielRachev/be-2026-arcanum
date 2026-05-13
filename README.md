@@ -83,18 +83,91 @@ uv run lab1 --email vmitev@tudelft.nl --github-url https://github.com/vesk4000/B
 - The client ignores responses from peers whose public key does not match the given server key.
 - Keep your `.pem` file safe: this is your identity for later labs.
 
+## Lab 2 – Coordinated Group Signing Prep Phase
+
+Lab 2 requires fast UDP coordination between three teammates. The **prep phase** sets this up before the timed challenge.
+
+### Quick Start
+
+**Step 1: Extract your public key** (share with teammates via WhatsApp)
+
+```powershell
+uv run lab2-prep --print-pubkey --pem lab1_identity.pem
+```
+
+**Step 2: Run prep with all three team members**
+
+All three nodes run simultaneously (same command on each machine with different `--udp-port`):
+
+```powershell
+uv run lab2-prep \
+  --udp-port 5000 \
+  --peer-pubkey <TEAMMATE_A_PUBKEY> \
+  --peer-pubkey <TEAMMATE_B_PUBKEY> \
+  --test-udp
+```
+
+IPv8 automatically discovers teammates' UDP endpoints. Each node just needs:
+- Its own UDP port (different for each: 5000, 5001, 5002)
+- The two teammates' public keys (same for all three)
+
+Expected output: canonical order, peer map, and ✓ connectivity test.
+
+**Optional: Manual endpoint mode** (if you know IPs ahead of time)
+
+```powershell
+uv run lab2-prep \
+  --udp-port 5000 \
+  --peer 192.168.1.10:5001 --peer-pubkey <PUBKEY_A> \
+  --peer 192.168.1.11:5002 --peer-pubkey <PUBKEY_B> \
+  --test-udp
+```
+
+### Lab 2 Prep Options
+
+- `--print-pubkey` – Extract pubkey from PEM, print & exit
+- `--pem <path>` – PEM file (default: `lab1_identity.pem`)
+- `--udp-port <int>` – Local UDP port (required)
+- `--peer-pubkey <hex>` – Teammate pubkey hex (repeatable, **2 required** for your 2 teammates)
+- `--peer <host:port>` – (Optional) Bypass IPv8 discovery and manually specify endpoint (repeatable)
+- `--test-udp` – Run UDP connectivity test (ping/pong)
+- `--debug` – Enable debug logging
+
+### How it works
+
+**Default mode (IPv8 auto-discovery):**
+1. Extracts your Ed25519 public key from Lab 1 PEM file
+2. Uses IPv8 peer discovery to automatically find teammates' UDP endpoints
+3. All nodes exchange endpoint information via IPv8 messages
+4. Sorts all three pubkeys lexicographically → canonical order
+5. Uses canonical order to assign fixed submitters: Round 1 → sorted[0], Round 2 → sorted[1], Round 3 → sorted[2]
+6. Tests connectivity via UDP ping/pong
+7. Reports peer map and submitter assignments
+
+**Manual mode (optional `--peer`):**
+- Use `--peer host:port` to manually specify teammates' endpoints instead of auto-discovery
+- Useful if IPv8 discovery isn't working or for known static IPs
+
+---
+
 ## Troubleshooting
 
 - If no server response arrives, ensure your packet is sent with IPv8 authenticated messaging (`ez_send`, as implemented).
 - If you get invalid hash rejections, confirm you are hashing the exact same email/URL strings you submit.
-- If logs show `Known peers: none yet`, your network isn’t discovering peers; try a different network or use `--bootstrap host:port`
+- If logs show `Known peers: none yet`, your network isn't discovering peers; try a different network or use `--bootstrap host:port`
   from a TA/classmate to seed discovery.
 - On Windows, the client auto-downloads the official libsodium MSVC bundle into `vendor/libsodium/` if the DLL is missing,
   and prepends that folder to `PATH` for the current process. This does **not** modify your system PATH.
-- On macOS/Linux, the client first tries your system libsodium. If it’s missing, you can either:
+- On macOS/Linux, the client first tries your system libsodium. If it's missing, you can either:
   - Install via your OS package manager (e.g. `brew install libsodium`, `apt install libsodium`)
   - Or set `LIBSODIUM_URL` to a direct archive URL that contains a prebuilt `libsodium.dylib` or `libsodium.so`.
 - You can always point to an existing local folder with the library via `LIBSODIUM_DIR`.
+
+**Lab 2 prep UDP connectivity issues:**
+- Check all three nodes are running
+- Verify firewall allows UDP on the specified ports
+- Confirm `--peer` addresses match where teammates are actually listening
+- If using different machines, ensure they can reach each other (try `ping` first)
 
 ---
 Hello!
