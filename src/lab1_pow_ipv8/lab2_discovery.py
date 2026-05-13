@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
+from typing import Any
 from time import time
 
 from cryptography.exceptions import UnsupportedAlgorithm
 from ipv8.community import Community, CommunitySettings
 from ipv8.lazy_community import PacketDecodingError, lazy_wrapper
 from ipv8.messaging.lazy_payload import VariablePayload, vp_compile
+from ipv8.messaging.payload_headers import BinMemberAuthenticationPayload
 from ipv8.peer import Peer
 
 from .constants import LAB2_COMMUNITY_ID_HEX
@@ -50,6 +53,8 @@ def build_lab2_discovery_community():
                 EndpointAnnouncementPayload, self.on_endpoint_announcement
             )
             self.add_message_handler(EndpointRequestPayload, self.on_endpoint_request)
+            self._unsupported_curve_packets_seen: set[tuple[str, int, str]] = set()
+            self._wrap_handlers_to_ignore_unsupported_curves()
 
             self.local_endpoint: tuple[str, int] | None = None  # (host, port)
             self.peer_endpoints: dict[bytes, tuple[str, int]] = (
@@ -104,6 +109,68 @@ def build_lab2_discovery_community():
 
         def set_target_pubkeys(self, pubkeys: list[bytes]) -> None:
             self.target_pubkeys = set(pubkeys)
+
+        def _wrap_handlers_to_ignore_unsupported_curves(self) -> None:
+            """Drop IPv8 packets whose legacy public-key curve is unsupported."""
+            for msg_id, handler in enumerate(self.decode_map):
+                if handler is not None:
+                    self.decode_map[msg_id] = self._ignore_unsupported_curve(
+                        msg_id, handler
+                    )
+
+        def _ignore_unsupported_curve(
+            self,
+            msg_id: int,
+            handler: Callable[[Any, bytes], Any],
+        ) -> Callable[[Any, bytes], Any]:
+            def wrapper(source_address: Any, data: bytes) -> Any:
+                try:
+                    return handler(source_address, data)
+                except UnsupportedAlgorithm as exc:
+                    self._log_unsupported_curve_packet(
+                        msg_id, source_address, data, exc
+                    )
+                    return None
+
+            return wrapper
+
+        def _log_unsupported_curve_packet(
+            self,
+            msg_id: int,
+            source_address: Any,
+            data: bytes,
+            exc: UnsupportedAlgorithm,
+        ) -> None:
+            pubkey_prefix = self._auth_pubkey_prefix(data)
+            source = repr(source_address)
+            error = str(exc)
+            key = (source, msg_id, error)
+            pubkey_suffix = (
+                f" (auth pubkey prefix {pubkey_prefix})" if pubkey_prefix else ""
+            )
+            message = (
+                "Ignoring IPv8 message %d from %s with unsupported legacy "
+                "public-key curve: %s%s"
+            )
+
+            if key in self._unsupported_curve_packets_seen:
+                self.logger.debug(message, msg_id, source, error, pubkey_suffix)
+                return
+
+            self._unsupported_curve_packets_seen.add(key)
+            self.logger.warning(message, msg_id, source, error, pubkey_suffix)
+
+        def _auth_pubkey_prefix(self, data: bytes) -> str | None:
+            try:
+                auth, _ = self.serializer.unpack_serializable(
+                    BinMemberAuthenticationPayload,
+                    data,
+                    offset=23,
+                )
+            except Exception:
+                return None
+
+            return auth.public_key_bin.hex()[:24]
 
         def started(self) -> None:
             """Called when community starts."""

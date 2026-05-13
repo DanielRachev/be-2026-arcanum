@@ -45,7 +45,10 @@ def parse_args() -> argparse.Namespace:
         action="append",
         dest="peer_pubkeys",
         default=[],
-        help="Public key hex of a teammate (can be repeated, 2 required for the other team members)",
+        help=(
+            "Public key hex of a teammate (repeat once per teammate; "
+            "1 allowed for two-person testing, 2 for the full group)"
+        ),
     )
     parser.add_argument(
         "--peer",
@@ -72,6 +75,33 @@ def parse_args() -> argparse.Namespace:
         help="Seconds to timeout after (default is 300s = 5 min)",
     )
     return parser.parse_args()
+
+
+def validate_peer_args(
+    auto_discover: bool,
+    peers: list[str],
+    peer_pubkeys: list[str],
+) -> str | None:
+    """Return an error message if peer CLI arguments are inconsistent."""
+    if auto_discover:
+        if not peer_pubkeys or len(peer_pubkeys) not in (1, 2):
+            return (
+                "Error: provide 1 --peer-pubkey for two-person testing, "
+                "or 2 --peer-pubkey values for the full group"
+            )
+    elif len(peers) != len(peer_pubkeys):
+        return (
+            "Error: --peer and --peer-pubkey must have the same count "
+            f"({len(peers)} vs {len(peer_pubkeys)})"
+        )
+
+    if len(set(peer_pubkeys)) != len(peer_pubkeys):
+        return (
+            "Error: duplicate --peer-pubkey values are not useful; pass each "
+            "teammate key once"
+        )
+
+    return None
 
 
 async def run_prep_phase(
@@ -215,6 +245,14 @@ async def run_prep_phase(
         # Compute canonical order (lexicographic by pubkey)
         all_pubkeys = [local_pubkey] + [p.pubkey_hex for p in peers]
         canonical_order = compute_canonical_order(all_pubkeys)
+        full_group = len(canonical_order) == 3
+
+        if not full_group:
+            LOGGER.warning(
+                "Two-person test mode: canonical order contains %d participant(s); "
+                "the full Lab 2 flow still requires 3 registered keys",
+                len(canonical_order),
+            )
 
         LOGGER.info("=" * 60)
         LOGGER.info("Prep Phase Complete")
