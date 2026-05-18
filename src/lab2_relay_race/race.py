@@ -51,6 +51,7 @@ class RaceSettings:
     key_file: str
     udp_port: int
     team_config: TeamConfig
+    manual_peers: dict[str, PeerEndpoint] | None = None
     discovery_timeout: float = 300.0
     server_peer_timeout: float = 30.0
     registration_timeout: float = 30.0
@@ -127,11 +128,17 @@ async def run_relay_race(settings: RaceSettings) -> RaceOutcome:
             [bytes.fromhex(pubkey) for pubkey in teammate_pubkeys]
         )
 
-        peer_map = await _discover_team_endpoints(
-            overlay,
-            teammate_members,
-            settings.discovery_timeout,
-        )
+        if settings.manual_peers is None:
+            peer_map = await _discover_team_endpoints(
+                overlay,
+                teammate_members,
+                settings.discovery_timeout,
+            )
+        else:
+            peer_map = _select_manual_team_endpoints(
+                settings.manual_peers,
+                teammate_members,
+            )
         udp_node.set_peers(peer_map)
 
         server_peer = await overlay.wait_for_server_peer(settings.server_peer_timeout)
@@ -174,6 +181,34 @@ async def _discover_team_endpoints(
             "Discovered Node %s (%s) at %s:%s", member.role, member.name, host, port
         )
     return peers
+
+
+def _select_manual_team_endpoints(
+    manual_peers: dict[str, PeerEndpoint],
+    teammate_members: list[TeamMember],
+) -> dict[str, PeerEndpoint]:
+    missing = [
+        member.name
+        for member in teammate_members
+        if member.pubkey_hex not in manual_peers
+    ]
+    if missing:
+        raise ValueError(f"Missing manual teammate endpoint(s): {', '.join(missing)}")
+
+    peer_map = {
+        member.pubkey_hex: manual_peers[member.pubkey_hex]
+        for member in teammate_members
+    }
+    for member in teammate_members:
+        peer = peer_map[member.pubkey_hex]
+        LOGGER.info(
+            "Using manual endpoint for Node %s (%s): %s:%s",
+            member.role,
+            member.name,
+            peer.host,
+            peer.port,
+        )
+    return peer_map
 
 
 class _RelayRaceSession:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from lab2_relay_race.community import RoundResult
+from lab2_relay_race.race_cli import parse_manual_peers
 from lab2_relay_race.race import (
     _looks_like_duplicate_success,
     build_ordered_signature_list,
@@ -52,3 +53,29 @@ def test_no_active_challenge_without_round_progress_is_not_success():
     )
 
     assert not _looks_like_duplicate_success(result, 2)
+
+
+def test_parse_manual_peers_accepts_role_endpoints():
+    team = load_team_config("lab2_team.json")
+
+    peers = parse_manual_peers(
+        ["A=127.0.0.1:5000", "B=127.0.0.1:5001"],
+        team,
+        team.members[2].pubkey_hex,
+    )
+
+    assert peers is not None
+    assert set(peers) == {team.members[0].pubkey_hex, team.members[1].pubkey_hex}
+    assert peers[team.members[0].pubkey_hex].host == "127.0.0.1"
+    assert peers[team.members[0].pubkey_hex].port == 5000
+
+
+def test_parse_manual_peers_requires_all_teammates():
+    team = load_team_config("lab2_team.json")
+
+    with pytest.raises(ValueError, match="Missing --peer"):
+        parse_manual_peers(
+            ["A=127.0.0.1:5000"],
+            team,
+            team.members[2].pubkey_hex,
+        )
